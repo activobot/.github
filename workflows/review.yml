@@ -1,0 +1,78 @@
+name: OpenAI Code Review
+on:
+  push:
+  pull_request:
+    types: [opened, synchronize]
+  pull_request_target:
+    types: [review_requested]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'synchronize')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: 0 # Fetch all history
+
+      - name: Setup Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install openai
+          
+      - name: Fetch Diff
+        run: |
+          git fetch origin ${{ github.event.pull_request.base.ref }}:${{ github.event.pull_request.base.ref }}
+          git fetch origin ${{ github.event.pull_request.head.ref }}:${{ github.event.pull_request.head.ref }}
+          git diff ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }} | head -c 12000 > diff.txt
+
+      - name: Print diff
+        run: cat diff.txt
+
+      - name: Review code using OpenAI
+        run: |
+          python .github/ops/openai_code_review.py ${{ secrets.OPEN_AI }} > review_comment.txt
+      
+      - name: Print review comment
+        run: cat review_comment.txt
+
+      - name: Post review as comment on PR or edit previous comment
+        uses: actions/github-script@v4
+        with:
+          github-token: ${{secrets.GH_TOKEN}}
+          script: |
+            const comment = require('fs').readFileSync('review_comment.txt', 'utf8');
+            if (comment.trim() === '') {
+              console.log('Review comment is empty. Skipping comment creation or edit.');
+              return;
+            }
+            github.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            }).then(comments => {
+              const botComment = comments.data.reverse().find(comment => comment.user.login === 'github-actions[bot]');
+              if (botComment) {
+                console.log(`Updating existing comment ID ${botComment.id}`);
+                return github.issues.updateComment({
+                  comment_id: botComment.id,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  body: comment
+                });
+              } else {
+                console.log('Creating new comment.');
+                return github.issues.createComment({
+                  issue_number: context.issue.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  body: comment
+                });
+              }
+            });
